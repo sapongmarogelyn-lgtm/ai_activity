@@ -47,8 +47,8 @@ model.eval()
 # =========================
 # Settings
 # =========================
-MAX_NEW_TOKENS = 300  # Allow longer, more complete responses
-TEMPERATURE = 0.8  # Balanced - creative but still coherent
+MAX_NEW_TOKENS = 700  # Allow longer multi-line/code responses
+TEMPERATURE = 0.4  # Lower temperature gives more stable CPU-trained output
 MAX_HISTORY_CHARS = 1000
 TYPE_DELAY = 0.015  # mas mababa = mas mabilis mag-type
 
@@ -72,13 +72,36 @@ def save_chat_log(chat_history: str, filename: str = "chat_log.txt"):
     with open(filename, "w", encoding="utf-8") as f:
         f.write(chat_history)
 
+def build_model_prompt(prompt: str) -> str:
+    """
+    Match the training-data style so the model gets a familiar prefix.
+    """
+    lowered = prompt.lower()
+    known_prefixes = (
+        "topic:",
+        "question:",
+        "answer:",
+        "problem:",
+        "explanation:",
+        "solution:",
+        "analysis:",
+        "concept:",
+    )
+    question_starters = ("what ", "why ", "how ", "when ", "where ", "who ", "which ")
+
+    if lowered.startswith(known_prefixes):
+        return prompt
+
+    if prompt.endswith("?") or lowered.startswith(question_starters):
+        return f"Question: {prompt}\nAnswer:"
+
+    return f"Topic: {prompt}\n"
+
 def generate_response(prompt: str, history: str = "") -> str:
     """
-    Generate text based on the prompt.
-    Since the model was trained on plain text, we use the prompt directly.
+    Generate text based on the prompt using a format similar to data/train.txt.
     """
-    # Use just the prompt, not conversation format
-    full_prompt = prompt
+    full_prompt = build_model_prompt(prompt)
 
     encoded = encode(full_prompt)
     if not encoded:
@@ -95,34 +118,21 @@ def generate_response(prompt: str, history: str = "") -> str:
 
     full_output = decode(generated)
     
-    # Remove the original prompt from the output
-    if full_output.startswith(prompt):
-        reply = full_output[len(prompt):].strip()
+    # Remove the formatted model prompt from the output
+    if full_output.startswith(full_prompt):
+        reply = full_output[len(full_prompt):].strip()
     else:
         reply = full_output.strip()
     
-    # Better stopping: stop at double newline or sentence end
-    # This preserves single newlines in code blocks but stops at paragraph breaks
-    stop_markers = ['\n\n', '. ', '? ', '! ']
-    min_stop = len(reply)
-    
-    for marker in stop_markers:
-        pos = reply.find(marker)
-        if pos != -1 and pos < min_stop:
-            min_stop = pos + len(marker.rstrip())
-    
-    if min_stop < len(reply):
-        reply = reply[:min_stop].strip()
-    
-    # Limit to reasonable length (first 500 chars max)
-    if len(reply) > 500:
-        # Try to stop at sentence boundary
-        for i in range(500, 200, -1):
-            if reply[i] in '.!?':
-                reply = reply[:i+1]
-                break
-        else:
-            reply = reply[:500] + "..."
+    # Keep blank lines and code blocks, but stop if generation drifts into
+    # another training entry.
+    next_topic_pos = reply.find("\nTopic:")
+    if next_topic_pos != -1:
+        reply = reply[:next_topic_pos].strip()
+
+    # Limit very long output without destroying normal code formatting.
+    if len(reply) > 1200:
+        reply = reply[:1200].rstrip() + "..."
 
     return clean_text(reply)
 
