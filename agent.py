@@ -97,6 +97,16 @@ def build_model_prompt(prompt: str) -> str:
 
     return f"Topic: {prompt}\n"
 
+# Markers that indicate a new training-data entry has started.
+# The model should stop generating once any of these appear again,
+# since that means it has drifted into the next Q&A block.
+STOP_MARKERS = (
+    "\nQuestion:",
+    "\nTopic:",
+    "\nProblem:",
+    "\nConcept:",
+)
+
 def generate_response(prompt: str, history: str = "") -> str:
     """
     Generate text based on the prompt using a format similar to data/train.txt.
@@ -117,18 +127,28 @@ def generate_response(prompt: str, history: str = "") -> str:
         )[0].tolist()
 
     full_output = decode(generated)
-    
+
     # Remove the formatted model prompt from the output
     if full_output.startswith(full_prompt):
         reply = full_output[len(full_prompt):].strip()
     else:
         reply = full_output.strip()
-    
-    # Keep blank lines and code blocks, but stop if generation drifts into
-    # another training entry.
-    next_topic_pos = reply.find("\nTopic:")
-    if next_topic_pos != -1:
-        reply = reply[:next_topic_pos].strip()
+
+    # Stop as soon as the model drifts into a new training entry
+    # (e.g. it starts generating "Question:" again for a different topic).
+    earliest_stop = len(reply)
+    for marker in STOP_MARKERS:
+        pos = reply.find(marker)
+        if pos != -1 and pos < earliest_stop:
+            earliest_stop = pos
+    reply = reply[:earliest_stop].strip()
+
+    # Also stop mid-line if a new "Question:" starts without a preceding
+    # newline (can happen right at the boundary of generation).
+    for marker in ("Question:", "Topic:", "Problem:", "Concept:"):
+        pos = reply.find(marker)
+        if pos > 0:  # pos == 0 would mean it's the start of a valid reply
+            reply = reply[:pos].strip()
 
     # Limit very long output without destroying normal code formatting.
     if len(reply) > 1200:

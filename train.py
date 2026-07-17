@@ -11,23 +11,23 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # CPU-optimized settings.
 # Good default for AMD Ryzen 3 PRO 2200G with 32GB RAM.
 if device == "cpu":
-    batch_size = 16  # Lower to 8 if training becomes too slow
-    block_size = 128  # Context length used during training
-    max_iters = 5000  # More iterations help the small model learn better
+    batch_size = 4  # Lower to 8 if training becomes too slow
+    block_size = 448  # Must cover the longest Question+Answer entry (was 96 - too small!)
+    max_iters = 3000  # More iterations help the small model learn better
     eval_interval = 500  
     learning_rate = 3e-4
     eval_iters = 10  # Reasonable evaluation
     
-    n_embd = 128  # Must be divisible by n_head
+    n_embd = 96  # Must be divisible by n_head
     n_head = 4
-    n_layer = 4
+    n_layer = 3
     dropout = 0.1
     print(f"Using device: {device} (CPU-optimized but capable)")
     print(f"Settings: batch={batch_size}, context={block_size}, embd={n_embd}, layers={n_layer}, iters={max_iters}")
 else:
     # GPU settings (original larger model)
     batch_size = 64
-    block_size = 256
+    block_size = 448
     max_iters = 15000
     eval_interval = 500  
     learning_rate = 3e-4
@@ -42,15 +42,18 @@ else:
 torch.manual_seed(1337)
 
 # =========================
-# Load text
+# Load text as discrete entries (instead of one long blob)
 # =========================
 with open("data/train.txt", "r", encoding="utf-8") as f:
-    text = f.read()
+    raw_text = f.read()
+
+# Split on blank lines -> one entry per Question/Answer pair
+entries = [e.strip() + "\n\n" for e in raw_text.split("\n\n") if e.strip()]
 
 # =========================
-# Build vocabulary
+# Build vocabulary (from the whole text, so nothing is missed)
 # =========================
-chars = sorted(list(set(text)))
+chars = sorted(list(set(raw_text)))
 vocab_size = len(chars)
 
 stoi = {ch: i for i, ch in enumerate(chars)}
@@ -62,18 +65,50 @@ def encode(s):
 def decode(tokens):
     return "".join([itos[i] for i in tokens])
 
-data = torch.tensor(encode(text), dtype=torch.long)
+# Encode each entry separately so it stays intact as one unit
+encoded_entries = [encode(e) for e in entries]
 
-# train / validation split
-n = int(0.9 * len(data))
-train_data = data[:n]
-val_data = data[n:]
+if len(encoded_entries) < 2:
+    raise ValueError(
+        "Need at least 2 Q&A entries in data/train.txt (separated by a blank line) "
+        "to create a train/val split."
+    )
+
+# train / val split by ENTRY, not by raw character offset
+# (an entry can no longer get sliced in half across the split)
+n_entries = len(encoded_entries)
+n_train = max(1, int(0.9 * n_entries))
+train_entries = encoded_entries[:n_train]
+val_entries = encoded_entries[n_train:]
+if len(val_entries) == 0:
+    # guarantee val is never empty even with a small dataset
+    val_entries = encoded_entries[-2:]
+    train_entries = encoded_entries[:-2] or encoded_entries[:1]
+
+longest_entry = max(len(e) for e in encoded_entries)
+if longest_entry > block_size:
+    raise ValueError(
+        f"block_size={block_size} is smaller than the longest entry ({longest_entry} chars). "
+        f"Increase block_size to at least {longest_entry}."
+    )
+
+print(f"Loaded {n_entries} Q&A entries | train={len(train_entries)} val={len(val_entries)} | "
+      f"longest entry={longest_entry} chars | block_size={block_size}")
+
+def pad_or_truncate(tokens, size):
+    if len(tokens) >= size:
+        return tokens[:size]
+    return tokens + [stoi["\n"]] * (size - len(tokens))  # pad with newline token
 
 def get_batch(split):
-    source = train_data if split == "train" else val_data
-    ix = torch.randint(len(source) - block_size, (batch_size,))
-    x = torch.stack([source[i:i + block_size] for i in ix])
-    y = torch.stack([source[i + 1:i + block_size + 1] for i in ix])
+    source = train_entries if split == "train" else val_entries
+    batch = []
+    for _ in range(batch_size):
+        entry = source[torch.randint(len(source), (1,)).item()]
+        batch.append(pad_or_truncate(entry, block_size + 1))  # +1 for the y shift
+    batch = torch.tensor(batch, dtype=torch.long)
+    x = batch[:, :block_size].contiguous()
+    y = batch[:, 1:block_size + 1].contiguous()
     return x.to(device), y.to(device)
 
 @torch.no_grad()
