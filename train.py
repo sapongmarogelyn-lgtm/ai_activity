@@ -11,9 +11,9 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 # CPU-optimized settings.
 # Good default for AMD Ryzen 3 PRO 2200G with 32GB RAM.
 if device == "cpu":
-    batch_size = 4  # Lower to 8 if training becomes too slow
+    batch_size = 8  # Increased from 4 for more stable gradients with larger dataset
     block_size = 448  # Must cover the longest Question+Answer entry (was 96 - too small!)
-    max_iters = 3000  # More iterations help the small model learn better
+    max_iters = 6000  # Increased from 3000 to give the larger dataset enough exposure per entry
     eval_interval = 500  
     learning_rate = 3e-4
     eval_iters = 10  # Reasonable evaluation
@@ -74,16 +74,29 @@ if len(encoded_entries) < 2:
         "to create a train/val split."
     )
 
+# Shuffle entries BEFORE splitting so the train/val split isn't biased by
+# where an entry happens to sit in the file. Without this, entries near the
+# end of train.txt (e.g. the last few Q&A pairs) always land in val_entries
+# and NEVER get a gradient update from optimizer.step() - they'd never be
+# learned at all, since val is only used to report a loss estimate.
+g = torch.Generator().manual_seed(1337)
+perm = torch.randperm(len(encoded_entries), generator=g).tolist()
+shuffled_entries = [encoded_entries[i] for i in perm]
+
 # train / val split by ENTRY, not by raw character offset
 # (an entry can no longer get sliced in half across the split)
-n_entries = len(encoded_entries)
-n_train = max(1, int(0.9 * n_entries))
-train_entries = encoded_entries[:n_train]
-val_entries = encoded_entries[n_train:]
+# Since this is a small, pure-memorization dataset (facts about TMC / the
+# developer / instructor, etc.) rather than a generalization task, we want
+# nearly everything to actually be trained on. Val is just a small sanity
+# check, not a signal to early-stop on.
+n_entries = len(shuffled_entries)
+n_train = max(1, int(0.95 * n_entries))
+train_entries = shuffled_entries[:n_train]
+val_entries = shuffled_entries[n_train:]
 if len(val_entries) == 0:
     # guarantee val is never empty even with a small dataset
-    val_entries = encoded_entries[-2:]
-    train_entries = encoded_entries[:-2] or encoded_entries[:1]
+    val_entries = shuffled_entries[-2:]
+    train_entries = shuffled_entries[:-2] or shuffled_entries[:1]
 
 longest_entry = max(len(e) for e in encoded_entries)
 if longest_entry > block_size:
